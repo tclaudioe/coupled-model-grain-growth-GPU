@@ -1,0 +1,25 @@
+Coupled Model v1.0
+
+Usage:
+    ./main.o -dt DT -output OUTPUT_FOLDER -vertex-file VERTEX_FILE -ridge-file RIGDE_FILE -save-each-percent PRCNT
+    -max-grains-percent MAX_PRCNT -solver (RK2|MULTISTEP) [-inner-resolution] -lambda LAMBDA -mu MU [-inner-resolution]
+    -kappa0 KAPPA0 -N0 N0 -Dkappa0 DKAPPA0
+
+Options:
+    -dt:                    Simulation time step.
+    -output:                Specifies output folder.
+    -vertex-file:           Specifies initial condition file VERTEX_FILE, the format of this file
+                            is a list of positions in the unit domain.
+    -ridge-file:            Specifies initial condition file RIDGE_FILE, the format is pairs of lines
+                            of VERTEX_FILE, so this specifies boundaries.
+    -save-each-percent:     Save each PRCNT of grains removed (in percentage) e.g. 0.05 indicates that
+                            a snap is taken each 5% of removed grains.
+    -max-grains-percent:    Max number of removed grains to stop simulation.
+    -solver:                Two options are handled:
+                            * RK2:       Second Order Runge-Kutta (No longer supported).
+                            * MULTISTEP: Euler Multistep with time step dtau = dt/N where N is the
+                                         number of multisteps to be performed. By default N = 4.
+    -inner-resolution:      If MULTISTEP solver is used, this option overrides the multistep size N.
+    -kappa0:                Base curvature threshold.
+    -N0:                    Base number of grains of the simulation where kappa0 was tunned.
+    -Dkappa0:               Base curvature growth threshold.
