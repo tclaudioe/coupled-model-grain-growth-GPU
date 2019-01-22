@@ -165,6 +165,17 @@ struct boundary {
 
     // Values of alphas
     coord alphas[INNER_POINTS];
+
+    // DEBUG: FOR DEBUG OPTIONS
+    vector2 ini_int;
+    vector2 end_int;
+    vector2 raw_tangent_vels[INNER_POINTS];
+    vector2 raw_normal_vels[INNER_POINTS];
+    vector2 raw_inivel;
+    vector2 raw_endvel;
+
+    // Check intersection flag
+    bool checked[2];
 };
 
 /* Special structure which holds loadable data of grains */

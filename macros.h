@@ -14,6 +14,9 @@
 #define SAVE_T_MIN -1
 #define SAVE_T_MAX -1
 
+// Set the energy function to use
+#define USE_OLD_ENERGY 1
+
 // Minimal value for the time delta after inhibition happens.
 // Big values may stuck the simulation,
 // (considerate the number of grains)

@@ -322,6 +322,14 @@ int main(int argc, char const *argv[])
         /*************************************/
         update_state_variables(dev_vertices,n_vertices, dev_boundaries,
                                 n_boundaries, dev_graindata, opt);
+
+        // Check for intersection of boundaries
+        // TODO: MAKE THIS WORK
+        cudaDeviceSynchronize();
+        check_intersections<<<N_BLKS, N_TRDS>>>(dev_boundaries, n_boundaries, steps);
+        cudaDeviceSynchronize();
+        set_checked_false<<<N_BLKS, N_TRDS>>>(dev_boundaries, n_boundaries, steps);
+        
         /*************************************/
         /* BEGIN: UPDATE STATE VARIABLES */
         /*************************************/

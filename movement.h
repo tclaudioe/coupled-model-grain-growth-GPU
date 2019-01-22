@@ -5,6 +5,7 @@
 #include "calculus.h"
 
 #define MIN_FLIP_STEPS 10
+#define INTERVAL_TOLERANCE 1e-12
 
 /* This function determines if a boundary is convex by
  checking if the tangent vector dot the normal vector rotated
@@ -99,9 +100,15 @@ __device__ __host__ inline bool is_boundary_stable(boundary *bnd) {
  * @return           Energy
  */
 __device__ double compute_boundary_energy(boundary *bnd, gdata *graindata, double eps, double delta_energy) {
+    #if USE_OLD_ENERGY == 1
     double ori1 = graindata[bnd->grains[0]].orientation;
     double ori2 = graindata[bnd->grains[1]].orientation;
-    double dalpha = fmod((ori1 - ori2),3.14159265358979323846/4);
+    double dalpha = ori1 - ori2;
+    return 1 + 0.5*eps*(1 - pow(cos(4*dalpha),3));
+    #else
+    double ori1 = graindata[bnd->grains[0]].orientation;
+    double ori2 = graindata[bnd->grains[1]].orientation;
+    double dalpha = acos(cos(4*(ori1 - ori2)))/4;
     double t_delta = delta_energy;
     double theta_s = 3.14159265358979323846/16;
     
@@ -114,6 +121,7 @@ __device__ double compute_boundary_energy(boundary *bnd, gdata *graindata, doubl
     else{
         return 1;
     }
+    #endif
 }
 /**
  * Compute boundary energy function per boundary with a given fixed epsilon
@@ -570,8 +578,15 @@ __global__ void compute_boundaries_velocities(boundary *boundaries, int n_bounda
             // Set velocities
             bnd->inivel.x = bnd->energy * lambda * (iniv.x+integrate_legendre_mult_by_cheb(xinterp,0));
             bnd->inivel.y = bnd->energy * lambda * (iniv.y+integrate_legendre_mult_by_cheb(yinterp,0));
+
+            // DEBUG: FOR LATER PRINTF
+            bnd->ini_int.x = integrate_legendre_mult_by_cheb(xinterp,0);
+            bnd->ini_int.y = integrate_legendre_mult_by_cheb(yinterp,0);
+            bnd->raw_inivel.x = iniv.x;
+            bnd->raw_inivel.y = iniv.y;
+            //END DEBUG
+
             for (int ii = 0; ii < INNER_POINTS; ii++) {
-	            //coord norm_l = sqrt(lx[ii+1] * lx[ii+1] + ly[ii+1] * ly[ii+1]);
                 tmp_nl.x=lx[ii+1];
                 tmp_nl.y=ly[ii+1];
                 norm_l = vector2_mag(tmp_nl);
@@ -581,9 +596,246 @@ __global__ void compute_boundaries_velocities(boundary *boundaries, int n_bounda
                 // Save the normal velocity for future use and debugging
                 bnd->normal_vels[ii].x = bnd->vels[ii].x;
                 bnd->normal_vels[ii].y = bnd->vels[ii].y;
+
+                // DEBUG
+                bnd->raw_normal_vels[ii].x = integrate_legendre_mult_by_cheb(xinterp, ii+1);
+                bnd->raw_normal_vels[ii].y = integrate_legendre_mult_by_cheb(yinterp, ii+1);
+                //END DEBUG
             }
-	        bnd->endvel.x = bnd->energy * lambda * (endv.x+integrate_legendre_mult_by_cheb(xinterp,INNER_POINTS+1));
+
+            bnd->endvel.x = bnd->energy * lambda * (endv.x+integrate_legendre_mult_by_cheb(xinterp,INNER_POINTS+1));
             bnd->endvel.y = bnd->energy * lambda * (endv.y+integrate_legendre_mult_by_cheb(yinterp,INNER_POINTS+1));
+
+            // DEBUG: FOR LATER PRINTF
+            bnd->end_int.x = integrate_legendre_mult_by_cheb(xinterp,INNER_POINTS+1);
+            bnd->end_int.y = integrate_legendre_mult_by_cheb(yinterp,INNER_POINTS+1);
+            bnd->raw_endvel.x = endv.x;
+            bnd->raw_endvel.y = endv.y;
+            //END DEBUG
+        }
+        tid += gridDim.x * blockDim.x;
+    }
+}
+
+/**
+ * Set all checked flags to false
+ */
+__global__ void set_checked_false(boundary *boundaries, int n_boundaries, int iteration)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    while (tid < n_boundaries) {
+        boundary *bnd = &boundaries[tid];
+        // Check if boundary it is active
+        if (bnd->enabled) {
+            bnd->checked[0] = false;
+            bnd->checked[1] = false;
+        }
+        tid += gridDim.x * blockDim.x;
+    }
+}
+
+/**
+ * Check intersection of boundaries
+ */
+__global__ void check_intersections(boundary *boundaries, int n_boundaries, int iteration) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    while (tid < n_boundaries) {
+        boundary *bnd = &boundaries[tid];
+        // Check if boundary it is active
+        if (bnd->enabled && bnd->arclen > 1e-4) {
+            // Apply Newton's method to each grain
+            for (int t = 0; t < 2; ++t) {
+                // t is the current grain
+
+                // Start from ini in the current boundary
+                vertex *ini = bnd->ini;
+
+                // Second boundary set to NULL
+                boundary *bnd2 = NULL;
+                boundary *bnd_prev = bnd;
+
+                // Iterate over each boundary of grain t until we reach the current boundary bnd
+                while (bnd != bnd2) {
+                    // Choose boundary connected to this vertex and member of the same grain, different from the current boundary
+
+                    // Boolean used to check if there are more boundaries not visited
+                    bool changed = false;
+
+                    // Itearte over each boundary connected to current ini vertex of current boundary
+                    for (int i = 0; i < 3; ++i) {
+
+                        // Choose i-th boundary
+                        bnd2 = ini->boundaries[i];
+
+                        // If bnd share the current t grain with bnd2 and it is different of bnd and bnd2 has a sufficient large arclen
+                        if ((bnd2->arclen > 1e-4) && (bnd != bnd2 && bnd2 != bnd_prev) && ((bnd2->grains[0] == bnd->grains[t]  && !bnd2->checked[0]) || (bnd2->grains[1] == bnd->grains[t] && !bnd2->checked[1])) ) {
+                            // A boundary was choosen, so set changed to true
+                            changed = true;
+                            bnd_prev = bnd2;
+
+                            // Use Newton's method to detect collision
+                            // Get boundary coordinates
+                            coord xpos_k[INNER_POINTS+2];
+                            coord ypos_k[INNER_POINTS+2];
+
+                            // Get second boundary coordinates
+                            coord xpos_l[INNER_POINTS+2];
+                            coord ypos_l[INNER_POINTS+2];
+
+                            // Fill boundary coordinates
+
+                            // Initial point
+                            xpos_k[0] = bnd->ini->pos.x;
+                            ypos_k[0] = bnd->ini->pos.y;
+                            xpos_l[0] = bnd2->ini->pos.x;
+                            ypos_l[0] = bnd2->ini->pos.y;
+
+                            // position 0
+                            if (xpos_k[0] - xpos_l[0] > DOMAIN_BOUND/2.0)
+                                xpos_l[0] += DOMAIN_BOUND;
+                            else if (xpos_k[0] - xpos_l[0] < -DOMAIN_BOUND/2.0)
+                                xpos_l[0] -= DOMAIN_BOUND;
+                            if (ypos_k[0] - ypos_l[0] > DOMAIN_BOUND/2.0)
+                                ypos_l[0] += DOMAIN_BOUND;
+                            else if (ypos_k[0] - ypos_l[0] < -DOMAIN_BOUND/2.0)
+                                ypos_l[0] -= DOMAIN_BOUND;
+
+                            for (int kk = 0; kk < INNER_POINTS; ++kk) {
+                                xpos_k[kk+1] = bnd->inners[kk].x;
+                                ypos_k[kk+1] = bnd->inners[kk].y;
+                                xpos_l[kk+1] = bnd2->inners[kk].x;
+                                ypos_l[kk+1] = bnd2->inners[kk].y;
+
+                                // Correction for pos_k
+                                if (xpos_k[0] - xpos_k[kk+1] > DOMAIN_BOUND/2.0)
+                                    xpos_k[kk+1] += DOMAIN_BOUND;
+                                else if (xpos_k[0] - xpos_k[kk+1] < -DOMAIN_BOUND/2.0)
+                                    xpos_k[kk+1] -= DOMAIN_BOUND;
+                                
+                                if (ypos_k[0] - ypos_k[kk+1] > DOMAIN_BOUND/2.0)
+                                    ypos_k[kk+1] += DOMAIN_BOUND;
+                                else if (ypos_k[0] - ypos_k[kk+1] < -DOMAIN_BOUND/2.0)
+                                    ypos_k[kk+1] -= DOMAIN_BOUND;
+
+                                // Correction for pos_l
+                                if (xpos_k[0] - xpos_l[kk+1] > DOMAIN_BOUND/2.0)
+                                    xpos_l[kk+1] += DOMAIN_BOUND;
+                                else if (xpos_k[0] - xpos_l[kk+1] < -DOMAIN_BOUND/2.0)
+                                    xpos_l[kk+1] -= DOMAIN_BOUND;
+                                if (ypos_k[0] - ypos_l[kk+1] > DOMAIN_BOUND/2.0)
+                                    ypos_l[kk+1] += DOMAIN_BOUND;
+                                else if (ypos_k[0] - ypos_l[kk+1] < -DOMAIN_BOUND/2.0)
+                                    ypos_l[kk+1] -= DOMAIN_BOUND;
+                            }
+
+                            xpos_k[3] = bnd->end->pos.x;
+                            ypos_k[3] = bnd->end->pos.y;
+                            xpos_l[3] = bnd2->end->pos.x;
+                            ypos_l[3] = bnd2->end->pos.y;
+
+                            // Correction for pos_k in position end-1
+                            if (xpos_k[0] - xpos_k[3] > DOMAIN_BOUND/2.0)
+                                xpos_k[3] += DOMAIN_BOUND;
+                            else if (xpos_k[0] - xpos_k[3] < -DOMAIN_BOUND/2.0)
+                                xpos_k[3] -= DOMAIN_BOUND;
+                            
+                            if (ypos_k[0] - ypos_k[3] > DOMAIN_BOUND/2.0)
+                                ypos_k[3] += DOMAIN_BOUND;
+                            else if (ypos_k[0] - ypos_k[3] < -DOMAIN_BOUND/2.0)
+                                ypos_k[3] -= DOMAIN_BOUND;
+
+                            // Correction for pos_l in position end-1
+                            if (xpos_k[0] - xpos_l[3] > DOMAIN_BOUND/2.0)
+                                xpos_l[3] += DOMAIN_BOUND;
+                            else if (xpos_k[0] - xpos_l[3] < -DOMAIN_BOUND/2.0)
+                                xpos_l[3] -= DOMAIN_BOUND;
+                            if (ypos_k[0] - ypos_l[3] > DOMAIN_BOUND/2.0)
+                                ypos_l[3] += DOMAIN_BOUND;
+                            else if (ypos_k[0] - ypos_l[3] < -DOMAIN_BOUND/2.0)
+                                ypos_l[3] -= DOMAIN_BOUND;
+
+                            // Derivatives
+                            coord lk_x[INNER_POINTS+2];
+                            coord lk_y[INNER_POINTS+2];
+                            coord ll_x[INNER_POINTS+2];
+                            coord ll_y[INNER_POINTS+2];
+
+                            // Get non-unitary tangent vector by spectral derivation
+                            derivate_interpolators(xpos_k, lk_x);
+                            derivate_interpolators(ypos_k, lk_y);
+                            derivate_interpolators(xpos_l, ll_x);
+                            derivate_interpolators(ypos_l, ll_y);
+
+                            // Use Newton's Method
+                            double sk[5] = {0.5, 0.25, 0.25, 0.75, 0.75};
+                            double sl[5] = {0.5, 0.25, 0.75, 0.25, 0.75};
+
+                            // Jacobian matrix and vector
+                            double J[2][2];
+                            double F[2];
+
+                            // Iterate for each initial guess
+                            for (int j = 0; j < 5; ++j) {
+                                // Initial guess
+                                double s[2] = { sk[j], sl[j] };
+                                int MAX_IT = 10;
+
+                                for (int it = 0; it < MAX_IT; ++it) {
+                                    // Fill the Jacobian matrix
+                                    J[0][0] = evaluate_w_cheb_interpolators(lk_x, s[0]);
+                                    J[1][0] = evaluate_w_cheb_interpolators(lk_y, s[0]);
+
+                                    J[0][1] = -evaluate_w_cheb_interpolators(ll_x, s[1]);
+                                    J[1][1] = -evaluate_w_cheb_interpolators(ll_y, s[1]);
+
+                                    // Compute the vector
+                                    F[0] = evaluate_w_cheb_interpolators(xpos_k, s[0]) - evaluate_w_cheb_interpolators(xpos_l, s[1]);
+                                    F[1] = evaluate_w_cheb_interpolators(ypos_k, s[0]) - evaluate_w_cheb_interpolators(ypos_l, s[1]);
+
+                                    // Compute the next solution
+                                    double det = J[0][0]*J[1][1] - J[1][0]*J[0][1];
+                                    double det_x = F[0]*J[1][1] - F[1]*J[0][1];
+                                    double det_y = J[0][0]*F[1] - J[1][0]*F[0];
+
+                                    s[0] = s[0] - det_x/det;
+                                    s[1] = s[1] - det_y/det;
+                                }
+
+                                // Check if a solution was found
+                                // Compute the vector
+                                F[0] = evaluate_w_cheb_interpolators(xpos_k, s[0]) - evaluate_w_cheb_interpolators(xpos_l, s[1]);
+                                F[1] = evaluate_w_cheb_interpolators(ypos_k, s[0]) - evaluate_w_cheb_interpolators(ypos_l, s[1]);
+                                
+                                if (sqrt(F[0]*F[0] + F[1]*F[1]) < 1e-12) {
+                                    if (
+                                        ( (INTERVAL_TOLERANCE < s[0] && s[0] + INTERVAL_TOLERANCE < 1.0) && (INTERVAL_TOLERANCE < s[1] && s[1] + INTERVAL_TOLERANCE < 1.0) ) ||
+                                        ( (INTERVAL_TOLERANCE < s[0] && s[0] + INTERVAL_TOLERANCE < 1.0) && (0.0 <= s[1] && s[1] <= 1.0) ) ||
+                                        ( (INTERVAL_TOLERANCE < s[1] && s[1] + INTERVAL_TOLERANCE < 1.0) && (0.0 <= s[0] && s[0] <= 1.0) )
+                                    ) {
+                                        // Test if boundary is a neighboor
+                                        if (bnd->ini == bnd2->ini || bnd->ini == bnd2->end || bnd->end == bnd2->ini || bnd->end == bnd2->end)
+                                            printf("(NEIGHBOR BOUNDARIES) ");
+                                        printf("Iteration %d . Boundaries: %d (energy = %f , arclen = %f ), %d (energy = %f , arclen = %f ) . s[0] = %.15f , s[1] = %.15f residual = %.15f . \n", iteration, bnd->id, bnd->energy, bnd->arclen, bnd2->id, bnd2->energy, bnd2->arclen, s[0], s[1], sqrt(F[0]*F[0] + F[1]*F[1]));
+                                    }
+                                }
+                            }
+                            if (bnd2->ini == ini)
+                                ini = bnd2->end;
+                            else if (bnd2->end == ini)
+                                ini = bnd2->ini;
+                            break;
+                        }
+                    }
+
+                    if (!changed)
+                        bnd2 = bnd;
+                }
+
+                // Mark this boundary as checked
+                bnd->checked[t] = true;
+            }
         }
         tid += gridDim.x * blockDim.x;
     }
@@ -748,6 +1000,7 @@ __global__ void compute_tangential_velocities(boundary *boundaries, int n_bounda
                 tvel.y = b[i]*TyH[i];
                 
                 bnd->tangent_vels[i] = tvel;
+                bnd->raw_tangent_vels[i] = tvel;
                 bnd->vels[i].x += tvel.x;
                 bnd->vels[i].y += tvel.y;
 
@@ -836,6 +1089,8 @@ __global__ void correct_inner_velocities(boundary *boundaries, int n_boundaries,
                         else {
                             bnd->vels[i].x = 0.0;
                             bnd->vels[i].y = 0.0;
+                            // Set the boundary as unstable
+                            bnd->stable = false;
                         }
                         // Always reparam if we are modifying velocities
                         bnd->reparam = true;
@@ -1043,6 +1298,9 @@ __global__ void apply_flips(boundary *boundaries, int n_boundaries, gdata *grain
                 bnd->t_steps_flip_applied=0;
                 if (tid == victim_bnd)
                     printf("Boundary %d has flipped\n", bnd->id);
+                // TEMPORAL PRINT: REMOVE IN THE FINAL VERSION
+                printf("FLIPPING: BOUNDARY %d HAS BEEN FLIPPED\n", bnd->id);
+                // END DEBUG
             }
             else
                 bnd->t_steps_flip_applied++;
