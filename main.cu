@@ -324,7 +324,6 @@ int main(int argc, char const *argv[])
                                 n_boundaries, dev_graindata, opt);
 
         // Check for intersection of boundaries
-        // TODO: MAKE THIS WORK
         cudaDeviceSynchronize();
         check_intersections<<<N_BLKS, N_TRDS>>>(dev_boundaries, n_boundaries, steps);
         cudaDeviceSynchronize();
